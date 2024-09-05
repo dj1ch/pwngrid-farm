@@ -1,9 +1,9 @@
 #include <Arduino.h>
 #include <random>
-#include <WiFi.h>
 
 #ifdef ESP32
 #include "esp_wifi.h"
+#include <WiFi.h>
 #elif defined(ESP8266)
 #include <ESP8266WiFi.h>
 #else
@@ -47,8 +47,12 @@ void loop() {
   Serial.println("SSID: " +  ssid);
   Serial.println("Mac Address: " +  mac);
 
-  #ifndef ESP32
-  esp_wifi_set_mac(WIFI_IF_AP, &newMACAddress[0]);
+  #ifdef ESP32
+  esp_wifi_set_mac(WIFI_IF_AP, &macArr[0]);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid);
+  #elif defined(ESP8266)
+  wifi_set_macaddr(0, const_cast<uint8*>(macArr));
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ssid);
   #endif
