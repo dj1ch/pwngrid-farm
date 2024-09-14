@@ -1,3 +1,26 @@
+/*
+ * pwngrid-farm: a POC pwngrid bypass
+ * Copyright (C) 2024 dj1ch
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE 
+ * SOFTWARE.
+*/
+
 #include <Arduino.h>
 #include <random>
 
@@ -11,11 +34,35 @@
 #endif
 
 /**
+ * Most of the code is derived from the ESP32 and ESP8266 beacon spammer
+ */
+
+/**
+ * @brief Settings
+ */
+const uint8_t channels[] = {1, 6, 11}; // used Wi-Fi channels (available: 1-14)
+const bool wpa2 = true; // WPA2 networks
+const bool appendSpaces = true; // makes all SSIDs 32 characters long to improve performance
+
+/**
  * @brief For the random SSID generator
  */
 const char letters_low[] = "abcdefghijklmnopqrstuvwxyz";
 const char letters_up[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const char numbers[] = "0123456789";
+
+/**
+ * @brief Run time variables
+ */
+char emptySSID[32];
+uint8_t channelIndex = 0;
+uint8_t macAddr[6];
+uint8_t wifi_channel = 1;
+uint32_t currentTime = 0;
+uint32_t packetSize = 0;
+uint32_t packetCounter = 0;
+uint32_t attackTime = 0;
+uint32_t packetRateTime = 0;
 
 /**
  * @brief Beacon frame packet(s) from https://github.com/spacehuhn/esp8266_beaconSpam/blob/master/esp8266_beaconSpam/esp8266_beaconSpam.ino#L96C1-L146C3
@@ -88,6 +135,8 @@ void setup() {
 }
 
 void loop() {
+  currentTime = millis();
+
   String ssid = generate_ssid();
   String mac = "";
   uint8_t *macArr = generate_mac();
@@ -106,12 +155,180 @@ void loop() {
   #ifdef ESP32
   esp_wifi_set_mac(WIFI_IF_AP, &macArr[0]);
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(ssid);
+
+  if (currentTime - attackTime > 100) {
+    attackTime = currentTime;
+
+    // temp variables
+    int i = 0;
+    int j = 0;
+    int ssidNum = 1;
+    char tmp;
+    int ssidsLen = strlen_P(ssid.c_str());
+    bool sent = false;
+
+    // go to next channel
+    nextChannel();
+
+    while (i < ssidsLen) {
+      // read out next SSID
+      j = 0;
+      do {
+        tmp = pgm_read_byte(ssid.c_str() + i + j);
+        j++;
+      } while (tmp != '\n' && j <= 32 && i + j < ssidsLen);
+
+      uint8_t ssidLen = j - 1;
+
+      // set MAC address
+      macAddr[5] = ssidNum;
+      ssidNum++;
+
+      // write MAC address into beacon frame
+      memcpy(&beaconPacket[10], macAddr, 6);
+      memcpy(&beaconPacket[16], macAddr, 6);
+
+      // reset SSID
+      memcpy(&beaconPacket[38], emptySSID, 32);
+
+      // write new SSID into beacon frame
+      memcpy_P(&beaconPacket[38], &ssid[i], ssidLen);
+
+      // set channel for beacon frame
+      beaconPacket[82] = wifi_channel;
+
+      // send packet
+      if (appendSpaces) {
+        for (int k = 0; k < 3; k++) {
+          //Serial.printf("size: %d \n", packetSize);
+          packetCounter += esp_wifi_80211_tx(WIFI_IF_STA, beaconPacket, packetSize, 0) == 0;
+          delay(1);
+        }
+      }
+
+      // remove spaces
+      else {
+        uint16_t tmpPacketSize = (109 - 32) + ssidLen; // calc size
+        uint8_t* tmpPacket = new uint8_t[tmpPacketSize]; // create packet buffer
+        memcpy(&tmpPacket[0], &beaconPacket[0], 37 + ssidLen); // copy first half of packet into buffer
+        tmpPacket[37] = ssidLen; // update SSID length byte
+        memcpy(&tmpPacket[38 + ssidLen], &beaconPacket[70], 39); // copy second half of packet into buffer
+
+        // send packet
+        for (int k = 0; k < 3; k++) {
+          packetCounter += esp_wifi_80211_tx(WIFI_IF_STA, tmpPacket, tmpPacketSize, 0) == 0;
+          delay(1);
+        }
+
+        delete tmpPacket; // free memory of allocated buffer
+      }
+
+      i += j;
+    }
+  }
+
+  // show packet-rate each second
+  if (currentTime - packetRateTime > 1000) {
+    packetRateTime = currentTime;
+    Serial.print("Packets/s: ");
+    Serial.println(packetCounter);
+    packetCounter = 0;
+  }
   #elif defined(ESP8266)
-  wifi_set_macaddr(0, const_cast<uint8*>(macArr));
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(ssid);
+  // send out SSIDs
+  if (currentTime - attackTime > 100) {
+    attackTime = currentTime;
+
+    // temp variables
+    int i = 0;
+    int j = 0;
+    int ssidNum = 1;
+    char tmp;
+    int ssidsLen = strlen_P(ssid.c_str());
+    bool sent = false;
+
+    // Go to next channel
+    nextChannel();
+
+    while (i < ssidsLen) {
+      // Get the next SSID
+      j = 0;
+      do {
+        tmp = pgm_read_byte(ssid.c_str() + i + j);
+        j++;
+      } while (tmp != '\n' && j <= 32 && i + j < ssidsLen);
+
+      uint8_t ssidLen = j - 1;
+
+      // set MAC address
+      macAddr[5] = ssidNum;
+      ssidNum++;
+
+      // write MAC address into beacon frame
+      memcpy(&beaconPacket[10], macAddr, 6);
+      memcpy(&beaconPacket[16], macAddr, 6);
+
+      // reset SSID
+      memcpy(&beaconPacket[38], emptySSID, 32);
+
+      // write new SSID into beacon frame
+      memcpy_P(&beaconPacket[38], &ssid[i], ssidLen);
+
+      // set channel for beacon frame
+      beaconPacket[82] = wifi_channel;
+
+      // send packet
+      if (appendSpaces) {
+        for (int k = 0; k < 3; k++) {
+          packetCounter += wifi_send_pkt_freedom(beaconPacket, packetSize, 0) == 0;
+          delay(1);
+        }
+      }
+
+      // remove spaces
+      else {
+
+        uint16_t tmpPacketSize = (packetSize - 32) + ssidLen; // calc size
+        uint8_t* tmpPacket = new uint8_t[tmpPacketSize]; // create packet buffer
+        memcpy(&tmpPacket[0], &beaconPacket[0], 38 + ssidLen); // copy first half of packet into buffer
+        tmpPacket[37] = ssidLen; // update SSID length byte
+        memcpy(&tmpPacket[38 + ssidLen], &beaconPacket[70], wpa2 ? 39 : 13); // copy second half of packet into buffer
+
+        // send packet
+        for (int k = 0; k < 3; k++) {
+          packetCounter += wifi_send_pkt_freedom(tmpPacket, tmpPacketSize, 0) == 0;
+          delay(1);
+        }
+
+        delete tmpPacket; // free memory of allocated buffer
+      }
+
+      i += j;
+    }
+  }
+
+  // show packet-rate each second
+  if (currentTime - packetRateTime > 1000) {
+    packetRateTime = currentTime;
+    Serial.print("Packets/s: ");
+    Serial.println(packetCounter);
+    packetCounter = 0;
+  }
   #endif
+}
+
+
+/**
+ * @brief Switches to the next channel by incrementing it by one
+ */
+void nextChannel() {
+    channelIndex = (channelIndex + 1) % (sizeof(channels) / sizeof(channels[0]));
+    wifi_channel = channels[channelIndex];
+    #ifdef ESP32
+    esp_wifi_set_channel(wifi_channel, WIFI_SECOND_CHAN_NONE);
+    #elif defined(ESP8266)
+    wifi_set_channel(wifi_channel);
+    #endif
 }
 
 /**
@@ -150,7 +367,7 @@ uint8_t* generate_mac() {
     static uint8_t mac[6];
     
     for (int i = 0; i < 6; i++) {
-        mac[i] = random_unsigned(0x00, 0xFF);
+      mac[i] = random_unsigned(0x00, 0xFF);
     }
     
     return mac;
